@@ -1,0 +1,142 @@
+import argparse
+import logging
+import os
+import cv2
+import numpy as np
+
+from football_vision.detector import PersonDetector
+from football_vision.tracker import PersonTracker
+from football_vision.team_classifier import TeamClassifier
+from football_vision.heatmap import HeatmapGenerator
+from football_vision.report import ReportGenerator
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger("football_vision")
+
+def resize_frame(frame: np.ndarray, max_side: int = 640) -> np.ndarray:
+    """
+    Resizes the frame so that the longest side is at most max_side, maintaining aspect ratio.
+    """
+    h, w = frame.shape[:2]
+    if max(h, w) <= max_side:
+        return frame
+
+    if w > h:
+        new_w = max_side
+        new_h = int(round(h * (max_side / w)))
+    else:
+        new_h = max_side
+        new_w = int(round(w * (max_side / h)))
+
+    return cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+def main():
+    parser = argparse.ArgumentParser(description="Football Vision CLI Application")
+    parser.add_argument("--input", required=True, type=str, help="Path to input video clip (e.g. clip.mp4)")
+    parser.add_argument("--output", required=True, type=str, help="Directory to save the output report and heatmaps")
+
+    args = parser.parse_args()
+
+    input_path = args.input
+    output_dir = args.output
+
+    if not os.path.exists(input_path):
+        logger.error(f"Input file does not exist: {input_path}")
+        return
+
+    # Open Video Source
+    cap = cv2.VideoCapture(input_path)
+    if not cap.isOpened():
+        logger.error(f"Failed to open video file: {input_path}")
+        return
+
+    # Read frame dimensions using CAP_PROP to robustly determine resolution before reading
+    w_orig = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h_orig = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+    if w_orig <= 0 or h_orig <= 0:
+        # Fallback by reading first frame if properties not available
+        ret, first_frame = cap.read()
+        if not ret:
+            logger.error("Empty video or failed to read first frame.")
+            cap.release()
+            return
+        h_orig, w_orig = first_frame.shape[:2]
+        # Reset video capture
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+
+    # Determine resized resolution
+    if max(h_orig, w_orig) <= 640:
+        w_res, h_res = w_orig, h_orig
+    else:
+        if w_orig > h_orig:
+            w_res = 640
+            h_res = int(round(h_orig * (640 / w_orig)))
+        else:
+            h_res = 640
+            w_res = int(round(w_orig * (640 / h_orig)))
+
+    # Initialize components
+    detector = PersonDetector()
+    tracker = PersonTracker()
+    team_classifier = TeamClassifier(max_frames=10)
+    heatmap_gen = HeatmapGenerator(width=w_res, height=h_res)
+
+    logger.info(f"Initialized modules with target frame resolution: {w_res}x{h_res}")
+
+    frame_count = 0
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        frame_count += 1
+
+        # Resize frame
+        resized = resize_frame(frame, max_side=640)
+
+        # 1. Detection
+        detections = detector.detect(resized)
+
+        # 2. Tracking
+        tracked_detections = tracker.update_with_detections(detections)
+
+        # 3. Team Classification Samples & Heatmap Accumulation
+        # tracker_id is present in tracked_detections.tracker_id
+        if tracked_detections.tracker_id is not None:
+            for bbox, track_id in zip(tracked_detections.xyxy, tracked_detections.tracker_id):
+                # Sample color for team classification
+                team_classifier.add_player_sample(track_id, resized, bbox)
+                # Accumulate positions for heatmap
+                heatmap_gen.accumulate_position(track_id, bbox)
+
+        if frame_count % 50 == 0:
+            logger.info(f"Processed {frame_count} frames...")
+
+    cap.release()
+    logger.info(f"Completed frame processing. Total frames: {frame_count}")
+
+    # 4. Fit and Classify Teams
+    logger.info("Performing team classification via KMeans clustering...")
+    team_assignments = team_classifier.fit_and_classify()
+
+    # 5. Generate Heatmaps
+    logger.info("Generating and saving team heatmaps...")
+    heatmap_gen.generate_and_save_heatmaps(team_assignments, output_dir)
+
+    # 6. Generate Report
+    logger.info("Writing final report...")
+    clip_name = os.path.basename(input_path)
+    report_gen = ReportGenerator(clip_name=clip_name, frame_count=frame_count)
+    report_path = report_gen.generate_report(
+        team_assignments=team_assignments,
+        track_coords=heatmap_gen.track_coords,
+        output_dir=output_dir
+    )
+
+    logger.info(f"Processing complete! Report saved at {report_path}")
+
+if __name__ == "__main__":
+    main()
