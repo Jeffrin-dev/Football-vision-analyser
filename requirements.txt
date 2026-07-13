@@ -1,0 +1,6 @@
+ultralytics==8.3.28
+supervision==0.25.0
+opencv-python-headless==4.10.0.84
+numpy==1.26.4
+scikit-learn==1.5.2
+matplotlib==3.9.2
