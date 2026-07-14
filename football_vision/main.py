@@ -13,6 +13,7 @@ from football_vision.report import ReportGenerator
 from football_vision.ball_detector import BallDetector
 from football_vision.possession import PossessionTracker
 from football_vision.events import EventDetector
+from football_vision.annotator import VideoAnnotator
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -193,6 +194,22 @@ def main():
         events=events,
         event_summary=event_summary
     )
+
+    # 7. Render Annotated Video (Phase 4)
+    logger.info("Rendering annotated video output...")
+    smoothed_possession = event_detector.smooth_possession(possession_tracker.frame_possession)
+    annotated_video_path = os.path.join(run_output_dir, "annotated_output.mp4")
+    annotator = VideoAnnotator(
+        input_path=input_path,
+        output_path=annotated_video_path,
+        frame_player_boxes=possession_tracker.frame_player_boxes,
+        smoothed_possession=smoothed_possession,
+        team_assignments=team_assignments,
+        ball_positions=ball_detector.interpolated_positions,
+        w_res=w_res,
+        h_res=h_res
+    )
+    annotator.render()
 
     logger.info(f"Processing complete! Report saved at {report_path}")
     print(f"\n[OUTPUT_DIR] Output files successfully saved to: {run_output_dir}\n")

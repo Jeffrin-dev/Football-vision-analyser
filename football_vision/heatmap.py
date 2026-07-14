@@ -47,7 +47,7 @@ class HeatmapGenerator:
             team = team_assignments.get(track_id, "A") # Default to Team A if unassigned
             if team == "A":
                 coords_team_a.extend(coords)
-            else:
+            elif team == "B":
                 coords_team_b.extend(coords)
 
         # Generate paths
