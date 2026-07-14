@@ -6,13 +6,15 @@ from typing import Dict, List, Tuple
 logger = logging.getLogger(__name__)
 
 class TeamClassifier:
-    def __init__(self, max_frames: int = 10):
+    def __init__(self, max_frames: int = 10, referee_threshold: float = 60.0):
         """
         Initializes the Team Classifier.
         For each tracked player, we sample the average color of the torso region
         over their first `max_frames` (default ~10) tracked frames.
+        - referee_threshold: distance threshold above which a player is reclassified as a referee.
         """
         self.max_frames = max_frames
+        self.referee_threshold = referee_threshold
         # Maps track_id to a list of sampled RGB colors (as numpy arrays or tuples)
         self.player_colors: Dict[int, List[np.ndarray]] = {}
         # Maps track_id to the final assigned team ('A' or 'B')
@@ -126,5 +128,19 @@ class TeamClassifier:
         # Map labels to 'A' or 'B'
         for tid, label in zip(track_ids, labels):
             self.assignments[tid] = "A" if label == 0 else "B"
+
+        # Separate outlier check for referee detection
+        for tid in track_ids:
+            avg_color = player_avg_colors[tid]
+            dist_0 = np.linalg.norm(avg_color - centers[0])
+            dist_1 = np.linalg.norm(avg_color - centers[1])
+
+            if dist_0 > self.referee_threshold and dist_1 > self.referee_threshold:
+                logger.info(
+                    f"Referee reclassification: track_id={tid}, "
+                    f"dist_to_centroid_0={dist_0:.2f}, dist_to_centroid_1={dist_1:.2f}, "
+                    f"threshold={self.referee_threshold:.2f}"
+                )
+                self.assignments[tid] = "referee"
 
         return self.assignments
