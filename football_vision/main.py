@@ -108,7 +108,7 @@ def main():
         detections = detector.detect(resized)
 
         # 2. Tracking
-        tracked_detections = tracker.update_with_detections(detections)
+        tracked_detections = tracker.update_with_detections(detections, frame=resized)
 
         # 3. Team Classification Samples & Heatmap Accumulation
         # tracker_id is present in tracked_detections.tracker_id
