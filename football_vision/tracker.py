@@ -2,12 +2,31 @@ import supervision as sv
 import weakref
 
 # Easily adjustable constants for tuning tracker behavior
-LOST_TRACK_BUFFER = 60             # Number of frames to keep a lost track alive before dropping it (default supervision is 30)
+LOST_TRACK_BUFFER = 90             # Number of frames to keep a lost track alive before dropping it (default supervision is 30)
 TRACK_ACTIVATION_THRESHOLD = 0.25   # Confidence threshold for track activation
 MINIMUM_MATCHING_THRESHOLD = 0.8    # Threshold for matching tracks with detections
 FRAME_RATE = 30                    # The frame rate of the video
 MIN_CONSECUTIVE_FRAMES = 1         # Number of consecutive frames an object must be tracked to be valid
 MIN_TRACK_LENGTH = 10              # Discard track_ids with fewer than this minimum number of tracked frames
+
+# --- TUNING COMMENTS & ANALYSIS ---
+# TRADEOFF ANALYSIS (LOST_TRACK_BUFFER):
+# Increasing LOST_TRACK_BUFFER (e.g., from 60 to 90 frames / 3 seconds) helps bridge longer gaps where
+# a player is temporarily occluded or out of detection range. However, there is a key tradeoff: if the
+# buffer is set too high, when two different players cross paths closely, the tracker may incorrectly
+# merge their trajectories into a single, persistent track ID when one player reappears. This ID-switching/
+# track-merging is a more severe issue than track fragmentation (which only splits a single trajectory)
+# because it pollutes individual statistics and scrambles team-classification clusters.
+#
+# DETECTION THRESHOLD OBSERVATIONS (detector.py):
+# In detector.py, the model is called without an explicit confidence threshold (e.g., self.model(frame)),
+# meaning it defaults to YOLOv8's built-in threshold of 0.25. If players are partially occluded, far away,
+# or blurred, their detection confidence may drop slightly below 0.25. These brief detection dropouts
+# prevent the tracker from receiving those detections entirely. Consequently, ByteTrack is forced to
+# keep the track "lost" during these frames. If dropouts are frequent or exceed the track buffer, the track
+# will fragment into a new ID. Lowering the detector's confidence threshold slightly (e.g., to 0.15 or 0.2)
+# and filtering or relying on tracker-internal thresholds might help recover these weak detections and bridge
+# the tracker gaps, but we leave detector.py unchanged per instructions.
 
 # Keep a weak reference to the active/most recent tracker instance
 _active_tracker_ref = None

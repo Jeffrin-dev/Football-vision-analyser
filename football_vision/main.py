@@ -77,6 +77,13 @@ def main():
             h_res = 640
             w_res = int(round(w_orig * (640 / h_orig)))
 
+    # Generate uniquely named subfolder using input clip's filename without extension + timestamp
+    import datetime
+    clip_basename = os.path.basename(input_path)
+    clip_name_no_ext, _ = os.path.splitext(clip_basename)
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_output_dir = os.path.join(output_dir, f"{clip_name_no_ext}_{timestamp}")
+
     # Initialize components
     detector = PersonDetector()
     tracker = PersonTracker()
@@ -124,7 +131,7 @@ def main():
 
     # 5. Generate Heatmaps
     logger.info("Generating and saving team heatmaps...")
-    heatmap_gen.generate_and_save_heatmaps(team_assignments, output_dir)
+    heatmap_gen.generate_and_save_heatmaps(team_assignments, run_output_dir)
 
     # 6. Generate Report
     logger.info("Writing final report...")
@@ -133,10 +140,11 @@ def main():
     report_path = report_gen.generate_report(
         team_assignments=team_assignments,
         track_coords=heatmap_gen.track_coords,
-        output_dir=output_dir
+        output_dir=run_output_dir
     )
 
     logger.info(f"Processing complete! Report saved at {report_path}")
+    print(f"\n[OUTPUT_DIR] Output files successfully saved to: {run_output_dir}\n")
 
 if __name__ == "__main__":
     main()
