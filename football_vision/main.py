@@ -3,12 +3,15 @@ import logging
 import os
 import cv2
 import numpy as np
+import supervision as sv
 
 from football_vision.detector import PersonDetector
 from football_vision.tracker import PersonTracker
 from football_vision.team_classifier import TeamClassifier
 from football_vision.heatmap import HeatmapGenerator
 from football_vision.report import ReportGenerator
+from football_vision.ball_detector import BallDetector
+from football_vision.possession import PossessionTracker
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -90,6 +93,10 @@ def main():
     team_classifier = TeamClassifier(max_frames=10)
     heatmap_gen = HeatmapGenerator(width=w_res, height=h_res)
 
+    # Initialize Phase 2 components
+    ball_detector = BallDetector()
+    possession_tracker = PossessionTracker()
+
     logger.info(f"Initialized modules with target frame resolution: {w_res}x{h_res}")
 
     frame_count = 0
@@ -104,11 +111,22 @@ def main():
         # Resize frame
         resized = resize_frame(frame, max_side=640)
 
-        # 1. Detection
-        detections = detector.detect(resized)
+        # 1. Detection: Run YOLOv8n inference once to detect both "person" and "sports ball"
+        results = detector.model(resized, verbose=False)
+
+        if not results:
+            person_detections = sv.Detections.empty()
+            ball_detections = sv.Detections.empty()
+        else:
+            all_detections = sv.Detections.from_ultralytics(results[0])
+            person_detections = all_detections[all_detections.class_id == 0]
+            ball_detections = all_detections[all_detections.class_id == 32]
 
         # 2. Tracking
-        tracked_detections = tracker.update_with_detections(detections, frame=resized)
+        tracked_detections = tracker.update_with_detections(person_detections, frame=resized)
+
+        # Record players for proximity possession (Phase 2)
+        possession_tracker.record_players(frame_count - 1, tracked_detections)
 
         # 3. Team Classification Samples & Heatmap Accumulation
         # tracker_id is present in tracked_detections.tracker_id
@@ -119,19 +137,37 @@ def main():
                 # Accumulate positions for heatmap
                 heatmap_gen.accumulate_position(track_id, bbox)
 
+        # Process ball detections (Phase 2)
+        ball_detector.process_frame_detections(ball_detections)
+
         if frame_count % 50 == 0:
             logger.info(f"Processed {frame_count} frames...")
 
     cap.release()
     logger.info(f"Completed frame processing. Total frames: {frame_count}")
 
+    # Interpolate ball detection gaps (Phase 2)
+    ball_detector.interpolate_gaps()
+    ball_stats = ball_detector.get_stats()
+
     # 4. Fit and Classify Teams
     logger.info("Performing team classification via KMeans clustering...")
     team_assignments = team_classifier.fit_and_classify()
 
+    # Compute and aggregate possession (Phase 2)
+    possession_tracker.compute_and_aggregate_possession(
+        frame_count=frame_count,
+        ball_positions=ball_detector.interpolated_positions,
+        team_assignments=team_assignments
+    )
+
     # 5. Generate Heatmaps
     logger.info("Generating and saving team heatmaps...")
     heatmap_gen.generate_and_save_heatmaps(team_assignments, run_output_dir)
+
+    # Generate and save ball trajectory map (Phase 2)
+    logger.info("Generating and saving ball trajectory...")
+    heatmap_gen.generate_and_save_ball_trajectory(ball_stats["trajectory"], run_output_dir)
 
     # 6. Generate Report
     logger.info("Writing final report...")
@@ -140,7 +176,10 @@ def main():
     report_path = report_gen.generate_report(
         team_assignments=team_assignments,
         track_coords=heatmap_gen.track_coords,
-        output_dir=run_output_dir
+        output_dir=run_output_dir,
+        ball_stats=ball_stats,
+        player_possession_counts=possession_tracker.player_possession_counts,
+        team_possession=possession_tracker.team_possession_counts
     )
 
     logger.info(f"Processing complete! Report saved at {report_path}")

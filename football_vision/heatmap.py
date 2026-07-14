@@ -1,5 +1,5 @@
 import os
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Any, Optional
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -84,3 +84,70 @@ class HeatmapGenerator:
         plt.tight_layout()
         plt.savefig(save_path, dpi=100)
         plt.close()
+
+    def generate_and_save_ball_trajectory(
+        self,
+        trajectory: List[Dict[str, Any]],
+        output_dir: str
+    ) -> str:
+        """
+        Generates and saves the ball_trajectory.png plotting the ball's path over the pitch.
+        Detected points: solid/vibrant marker.
+        Interpolated points: lighter/dashed or different marker.
+        Returns the path to the saved PNG.
+        """
+        os.makedirs(output_dir, exist_ok=True)
+        save_path = os.path.join(output_dir, "ball_trajectory.png")
+
+        plt.figure(figsize=(8, 6))
+
+        if len(trajectory) > 0:
+            # Parse trajectory data
+            frames = [pt["frame"] for pt in trajectory]
+            xs = [pt["x"] for pt in trajectory]
+            ys = [pt["y"] for pt in trajectory]
+            sources = [pt["source"] for pt in trajectory]
+
+            # 1. Plot continuous light grey dashed line representing the sequential path
+            plt.plot(xs, ys, color="gray", linestyle="--", alpha=0.5, linewidth=1, label="Sequential Path")
+
+            # 2. Extract and plot detected coordinates
+            det_xs = [xs[i] for i in range(len(xs)) if sources[i] == "detected"]
+            det_ys = [ys[i] for i in range(len(ys)) if sources[i] == "detected"]
+            if det_xs:
+                plt.scatter(
+                    det_xs, det_ys,
+                    color="blue",
+                    marker="o",
+                    s=25,
+                    alpha=1.0,
+                    label="Detected Ball"
+                )
+
+            # 3. Extract and plot interpolated coordinates
+            interp_xs = [xs[i] for i in range(len(xs)) if sources[i] == "interpolated"]
+            interp_ys = [ys[i] for i in range(len(ys)) if sources[i] == "interpolated"]
+            if interp_xs:
+                plt.scatter(
+                    interp_xs, interp_ys,
+                    color="orange",
+                    marker="^",
+                    s=20,
+                    alpha=0.6,
+                    label="Interpolated Ball"
+                )
+
+            plt.legend(loc="upper right")
+        else:
+            plt.text(self.width / 2, self.height / 2, "No Ball Trajectory Data", ha='center', va='center', fontsize=14)
+
+        plt.xlim(0, self.width)
+        plt.ylim(self.height, 0) # Invert y-axis to match video frame (0 at top)
+        plt.title("Ball Trajectory Map")
+        plt.xlabel("X (pixels)")
+        plt.ylabel("Y (pixels)")
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=100)
+        plt.close()
+
+        return save_path
