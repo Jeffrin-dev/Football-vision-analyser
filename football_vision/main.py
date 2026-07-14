@@ -12,6 +12,7 @@ from football_vision.heatmap import HeatmapGenerator
 from football_vision.report import ReportGenerator
 from football_vision.ball_detector import BallDetector
 from football_vision.possession import PossessionTracker
+from football_vision.events import EventDetector
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -169,6 +170,15 @@ def main():
     logger.info("Generating and saving ball trajectory...")
     heatmap_gen.generate_and_save_ball_trajectory(ball_stats["trajectory"], run_output_dir)
 
+    # Compute events and summary (Phase 3)
+    logger.info("Detecting passes and turnovers...")
+    event_detector = EventDetector()
+    events = event_detector.detect_events(
+        frame_possession=possession_tracker.frame_possession,
+        team_assignments=team_assignments
+    )
+    event_summary = event_detector.generate_summary(events)
+
     # 6. Generate Report
     logger.info("Writing final report...")
     clip_name = os.path.basename(input_path)
@@ -179,7 +189,9 @@ def main():
         output_dir=run_output_dir,
         ball_stats=ball_stats,
         player_possession_counts=possession_tracker.player_possession_counts,
-        team_possession=possession_tracker.team_possession_counts
+        team_possession=possession_tracker.team_possession_counts,
+        events=events,
+        event_summary=event_summary
     )
 
     logger.info(f"Processing complete! Report saved at {report_path}")

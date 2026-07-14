@@ -15,7 +15,9 @@ class ReportGenerator:
         output_dir: str,
         ball_stats: Optional[Dict[str, Any]] = None,
         player_possession_counts: Optional[Dict[int, int]] = None,
-        team_possession: Optional[Dict[str, int]] = None
+        team_possession: Optional[Dict[str, int]] = None,
+        events: Optional[List[Dict[str, Any]]] = None,
+        event_summary: Optional[Dict[str, int]] = None
     ) -> str:
         """
         Generates and writes a report.json file in the output directory.
@@ -90,6 +92,12 @@ class ReportGenerator:
         # Additive: Include top-level "team_possession" section if provided
         if team_possession is not None:
             report_data["team_possession"] = team_possession
+
+        # Additive: Include top-level "events" and "event_summary" if provided
+        if events is not None:
+            report_data["events"] = events
+        if event_summary is not None:
+            report_data["event_summary"] = event_summary
 
         report_path = os.path.join(output_dir, "report.json")
         with open(report_path, "w") as f:
