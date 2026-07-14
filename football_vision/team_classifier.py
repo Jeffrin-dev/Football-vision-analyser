@@ -83,7 +83,7 @@ class TeamClassifier:
             color = self.extract_torso_color(frame, bbox)
             self.player_colors[track_id].append(color)
 
-    def fit_and_classify(self) -> Dict[int, str]:
+    def fit_and_classify(self, track_coords: Dict[int, List[Tuple[float, float]]] = None) -> Dict[int, str]:
         """
         Performs k-means clustering (k=2) across all players' average colors
         to assign team 'A' or 'B'. Logs a warning if the cluster centers are too similar.
@@ -129,18 +129,65 @@ class TeamClassifier:
         for tid, label in zip(track_ids, labels):
             self.assignments[tid] = "A" if label == 0 else "B"
 
-        # Separate outlier check for referee detection
+        # Calculate movement range for each player
+        ranges = {}
+        if track_coords is not None:
+            for tid, coords in track_coords.items():
+                if len(coords) >= 1:
+                    xs = [pt[0] for pt in coords]
+                    ys = [pt[1] for pt in coords]
+                    dx = max(xs) - min(xs)
+                    dy = max(ys) - min(ys)
+                    rng = float(np.sqrt(dx**2 + dy**2))
+                    ranges[tid] = rng
+                else:
+                    ranges[tid] = 0.0
+
+        for tid in track_ids:
+            if tid not in ranges:
+                ranges[tid] = 0.0
+
+        # Identify confirmed team A/B player ranges (non-outliers initially)
+        team_player_ranges = []
+        for tid in track_ids:
+            avg_color = player_avg_colors[tid]
+            dist_0 = np.linalg.norm(avg_color - centers[0])
+            dist_1 = np.linalg.norm(avg_color - centers[1])
+            if dist_0 <= self.referee_threshold or dist_1 <= self.referee_threshold:
+                team_player_ranges.append(ranges[tid])
+
+        if team_player_ranges:
+            median_range = float(np.median(team_player_ranges))
+        else:
+            median_range = 0.0
+
+        # Classify color outliers as goalkeeper or referee
         for tid in track_ids:
             avg_color = player_avg_colors[tid]
             dist_0 = np.linalg.norm(avg_color - centers[0])
             dist_1 = np.linalg.norm(avg_color - centers[1])
 
             if dist_0 > self.referee_threshold and dist_1 > self.referee_threshold:
+                p_range = ranges[tid]
+                if median_range > 0 and p_range < 0.4 * median_range:
+                    final_label = "goalkeeper"
+                else:
+                    final_label = "referee"
+
+                self.assignments[tid] = final_label
                 logger.info(
-                    f"Referee reclassification: track_id={tid}, "
+                    f"Classification decision: track_id={tid}, "
                     f"dist_to_centroid_0={dist_0:.2f}, dist_to_centroid_1={dist_1:.2f}, "
-                    f"threshold={self.referee_threshold:.2f}"
+                    f"movement_range={p_range:.2f}, median_range={median_range:.2f}, "
+                    f"final_label={final_label}"
                 )
-                self.assignments[tid] = "referee"
+            else:
+                p_range = ranges[tid]
+                logger.info(
+                    f"Classification decision: track_id={tid}, "
+                    f"dist_to_centroid_0={dist_0:.2f}, dist_to_centroid_1={dist_1:.2f}, "
+                    f"movement_range={p_range:.2f}, median_range={median_range:.2f}, "
+                    f"final_label={self.assignments[tid]}"
+                )
 
         return self.assignments

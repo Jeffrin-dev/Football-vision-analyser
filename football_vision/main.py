@@ -154,7 +154,7 @@ def main():
 
     # 4. Fit and Classify Teams
     logger.info("Performing team classification via KMeans clustering...")
-    team_assignments = team_classifier.fit_and_classify()
+    team_assignments = team_classifier.fit_and_classify(track_coords=heatmap_gen.track_coords)
 
     # Compute and aggregate possession (Phase 2)
     possession_tracker.compute_and_aggregate_possession(

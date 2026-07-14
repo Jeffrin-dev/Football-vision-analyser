@@ -2,8 +2,10 @@ import numpy as np
 from typing import Dict, List, Tuple, Optional
 
 # Tunable constant for ball proximity (in pixels) for a 640px-wide frame.
-# This default (e.g. 40 pixels) is a sensible distance representation for players close to the ball.
-PROXIMITY_THRESHOLD = 40.0
+# Tightened moderately from 40.0 to 30.0 as a partial mitigation to possession lock issues.
+# NOTE: This is a partial mitigation, not a full fix — true accuracy requires
+# ball-contact/motion-correlation modeling, which is out of scope for this phase.
+PROXIMITY_THRESHOLD = 30.0
 
 class PossessionTracker:
     def __init__(self, proximity_threshold: float = PROXIMITY_THRESHOLD):

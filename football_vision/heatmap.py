@@ -45,6 +45,7 @@ class HeatmapGenerator:
 
         for track_id, coords in self.track_coords.items():
             team = team_assignments.get(track_id, "A") # Default to Team A if unassigned
+            # "goalkeeper" and "referee" assignments are excluded from team heatmaps
             if team == "A":
                 coords_team_a.extend(coords)
             elif team == "B":
