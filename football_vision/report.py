@@ -1,6 +1,6 @@
 import json
 import os
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Any, Optional
 import numpy as np
 
 class ReportGenerator:
@@ -12,7 +12,10 @@ class ReportGenerator:
         self,
         team_assignments: Dict[int, str],
         track_coords: Dict[int, List[Tuple[float, float]]],
-        output_dir: str
+        output_dir: str,
+        ball_stats: Optional[Dict[str, Any]] = None,
+        player_possession_counts: Optional[Dict[int, int]] = None,
+        team_possession: Optional[Dict[str, int]] = None
     ) -> str:
         """
         Generates and writes a report.json file in the output directory.
@@ -25,13 +28,30 @@ class ReportGenerator:
               "track_id": 1,
               "team": "A",
               "frames_tracked": 45,
-              "avg_position": [x, y]
+              "avg_position": [x, y],
+              "possession_frames": 10  # Added in Phase 2
             }
-          ]
+          ],
+          "ball": {  # Added in Phase 2
+            "frames_detected": 100,
+            "frames_interpolated": 10,
+            "frames_missing": 40,
+            "trajectory": [
+              {"frame": 1, "x": 100.0, "y": 200.0, "source": "detected"}
+            ]
+          },
+          "team_possession": {  # Added in Phase 2
+            "A": 50,
+            "B": 40,
+            "contested": 20
+          }
         }
         Returns the path to the report.json.
         """
         os.makedirs(output_dir, exist_ok=True)
+
+        if player_possession_counts is None:
+            player_possession_counts = {}
 
         players_report = []
         for track_id, coords in track_coords.items():
@@ -44,18 +64,32 @@ class ReportGenerator:
             else:
                 avg_pos = [0.0, 0.0]
 
-            players_report.append({
+            player_entry = {
                 "track_id": int(track_id),
                 "team": team,
                 "frames_tracked": int(frames_tracked),
                 "avg_position": [float(avg_pos[0]), float(avg_pos[1])]
-            })
+            }
+
+            # Additive: Include possession_frames in each player's stats
+            possession_frames = player_possession_counts.get(int(track_id), 0)
+            player_entry["possession_frames"] = int(possession_frames)
+
+            players_report.append(player_entry)
 
         report_data = {
             "clip": self.clip_name,
             "frame_count": int(self.frame_count),
             "players": players_report
         }
+
+        # Additive: Include top-level "ball" section if provided
+        if ball_stats is not None:
+            report_data["ball"] = ball_stats
+
+        # Additive: Include top-level "team_possession" section if provided
+        if team_possession is not None:
+            report_data["team_possession"] = team_possession
 
         report_path = os.path.join(output_dir, "report.json")
         with open(report_path, "w") as f:
