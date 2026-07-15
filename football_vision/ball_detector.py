@@ -9,6 +9,13 @@ logger = logging.getLogger(__name__)
 # start at 80 pixels, at the 640px-wide working resolution — may need adjusting based on typical player spacing observed
 MAX_PLAUSIBLE_PLAYER_DISTANCE = 80.0
 
+# Constant for ball trajectory continuity check (pixels/frame)
+# Panning adds apparent motion on top of real ball speed so this needs to stay generous — better to under-reject than falsely reject a genuinely fast/long ball.
+MAX_BALL_SPEED_PX_PER_FRAME = 40.0
+
+# Number of initial confirmed detections to accept as-is to bootstrap without continuity check
+BOOTSTRAP_CONFIRMED_COUNT = 3
+
 class BallDetector:
     def __init__(
         self,
@@ -36,17 +43,27 @@ class BallDetector:
         # Source tag for each frame: "detected", "interpolated", or "missing"
         self.sources: List[str] = []
 
+        # Ball trajectory continuity state
+        self.last_confirmed_pos: Optional[Tuple[float, float]] = None
+        self.last_confirmed_frame: Optional[int] = None
+        self.confirmed_count: int = 0
+
     def process_frame_detections(self, detections: sv.Detections, tracked_players: Optional[sv.Detections] = None):
         """
         Processes detections for a single frame, filtered for "sports ball" (COCO class 32).
         Uses proximity-to-player reranking to find and record the ball detection.
         If no ball is detected, records None.
         """
+        frame_num = len(self.raw_positions) + 1
+
         if len(detections) == 0:
             self.raw_positions.append(None)
             self.raw_widths.append(None)
-            frame_num = len(self.raw_positions)
-            logger.info(f"[BALL DETECTOR] Frame {frame_num}: raw_candidates=0, decision=none")
+            logger.info(
+                f"[BALL DETECTOR] Frame {frame_num}: raw_candidates=0, proximity_passing=0, "
+                f"continuity_candidates_considered=0, chosen_speed=None, continuity_status=had-no-candidates, "
+                f"decision=none"
+            )
             return
 
         # 1. Collect ALL "sports ball" class detections per frame, each with (x, y, confidence, bbox_width)
@@ -87,44 +104,103 @@ class BallDetector:
         # 4. Filter candidates within MAX_PLAUSIBLE_PLAYER_DISTANCE
         passing_candidates = [item for item in candidates_with_dists if item[1] <= MAX_PLAUSIBLE_PLAYER_DISTANCE]
 
-        chosen_candidate = None
-        is_fallback = False
-        nearest_distance = float('inf')
-
         if passing_candidates:
-            # Pick highest confidence passing candidate
-            best_item = max(passing_candidates, key=lambda x: x[0]["confidence"])
-            chosen_candidate, nearest_distance = best_item
+            # Check bootstrap status
+            is_bootstrap = (self.last_confirmed_pos is None) or (self.confirmed_count < BOOTSTRAP_CONFIRMED_COUNT)
+
+            if is_bootstrap:
+                # Bootstrap: pick the highest confidence passing candidate without continuity checks
+                best_item = max(passing_candidates, key=lambda x: x[0]["confidence"])
+                chosen_candidate, nearest_distance = best_item
+
+                # Update continuity states since this is a proximity-passing (confirmed) detection
+                self.last_confirmed_pos = (chosen_candidate["x"], chosen_candidate["y"])
+                self.last_confirmed_frame = frame_num
+                self.confirmed_count += 1
+
+                self.raw_positions.append((chosen_candidate["x"], chosen_candidate["y"]))
+                self.raw_widths.append(chosen_candidate["width"])
+
+                logger.info(
+                    f"[BALL DETECTOR] Frame {frame_num}: raw_candidates={len(candidates)}, "
+                    f"proximity_passing={len(passing_candidates)}, continuity_candidates_considered={len(passing_candidates)}, "
+                    f"chosen_speed=None, continuity_status=passed, decision=bootstrap_normal, "
+                    f"x={chosen_candidate['x']:.2f}, y={chosen_candidate['y']:.2f}"
+                )
+            else:
+                # Not bootstrap: perform continuity check
+                # Compute implied speed for each passing candidate
+                frames_elapsed = frame_num - self.last_confirmed_frame
+                for item in passing_candidates:
+                    cand = item[0]
+                    dx = cand["x"] - self.last_confirmed_pos[0]
+                    dy = cand["y"] - self.last_confirmed_pos[1]
+                    disp = np.sqrt(dx**2 + dy**2)
+                    cand["implied_speed"] = disp / frames_elapsed
+
+                valid_continuity_candidates = [
+                    item for item in passing_candidates
+                    if item[0]["implied_speed"] <= MAX_BALL_SPEED_PX_PER_FRAME
+                ]
+
+                if valid_continuity_candidates:
+                    # Choose highest-confidence candidate among the valid ones
+                    best_item = max(valid_continuity_candidates, key=lambda x: x[0]["confidence"])
+                    chosen_candidate, nearest_distance = best_item
+
+                    # Update continuity states with confirmed detection
+                    self.last_confirmed_pos = (chosen_candidate["x"], chosen_candidate["y"])
+                    self.last_confirmed_frame = frame_num
+                    self.confirmed_count += 1
+
+                    self.raw_positions.append((chosen_candidate["x"], chosen_candidate["y"]))
+                    self.raw_widths.append(chosen_candidate["width"])
+
+                    logger.info(
+                        f"[BALL DETECTOR] Frame {frame_num}: raw_candidates={len(candidates)}, "
+                        f"proximity_passing={len(passing_candidates)}, continuity_candidates_considered={len(passing_candidates)}, "
+                        f"chosen_speed={chosen_candidate['implied_speed']:.2f}, continuity_status=passed, decision=normal, "
+                        f"x={chosen_candidate['x']:.2f}, y={chosen_candidate['y']:.2f}"
+                    )
+                else:
+                    # All passing candidates exceed the speed limit: do not force a pick
+                    self.raw_positions.append(None)
+                    self.raw_widths.append(None)
+
+                    logger.info(
+                        f"[BALL DETECTOR] Frame {frame_num}: raw_candidates={len(candidates)}, "
+                        f"proximity_passing={len(passing_candidates)}, continuity_candidates_considered={len(passing_candidates)}, "
+                        f"chosen_speed=None, continuity_status=failed, decision=none_no_plausible_continuation"
+                    )
         else:
-            # Zero candidates pass: fallback to highest-confidence raw candidate
+            # Zero candidates pass proximity: fallback to highest-confidence raw candidate
+            # This does NOT update confirmed positions
+            chosen_candidate = None
+            nearest_distance = float('inf')
+
             if candidates_with_dists:
-                is_fallback = True
                 best_item = max(candidates_with_dists, key=lambda x: x[0]["confidence"])
                 chosen_candidate, nearest_distance = best_item
 
-        frame_num = len(self.raw_positions) + 1
+            if chosen_candidate is not None:
+                self.raw_positions.append((chosen_candidate["x"], chosen_candidate["y"]))
+                self.raw_widths.append(chosen_candidate["width"])
 
-        if chosen_candidate is not None:
-            self.raw_positions.append((chosen_candidate["x"], chosen_candidate["y"]))
-            self.raw_widths.append(chosen_candidate["width"])
-
-            # Log decision
-            if is_fallback:
                 logger.info(
                     f"[BALL DETECTOR] Frame {frame_num}: raw_candidates={len(candidates)}, "
-                    f"nearest_player_distance={nearest_distance:.2f}, decision=fallback, "
-                    f"tag=no_player_proximity_fallback, x={chosen_candidate['x']:.2f}, y={chosen_candidate['y']:.2f}"
-                )
-            else:
-                logger.info(
-                    f"[BALL DETECTOR] Frame {frame_num}: raw_candidates={len(candidates)}, "
-                    f"nearest_player_distance={nearest_distance:.2f}, decision=normal, "
+                    f"proximity_passing=0, continuity_candidates_considered=0, chosen_speed=None, "
+                    f"continuity_status=had-no-candidates, decision=fallback, tag=no_player_proximity_fallback, "
                     f"x={chosen_candidate['x']:.2f}, y={chosen_candidate['y']:.2f}"
                 )
-        else:
-            self.raw_positions.append(None)
-            self.raw_widths.append(None)
-            logger.info(f"[BALL DETECTOR] Frame {frame_num}: raw_candidates=0, decision=none")
+            else:
+                self.raw_positions.append(None)
+                self.raw_widths.append(None)
+
+                logger.info(
+                    f"[BALL DETECTOR] Frame {frame_num}: raw_candidates={len(candidates)}, "
+                    f"proximity_passing=0, continuity_candidates_considered=0, chosen_speed=None, "
+                    f"continuity_status=had-no-candidates, decision=none"
+                )
 
     def apply_motion_plausibility_filter(self):
         """
