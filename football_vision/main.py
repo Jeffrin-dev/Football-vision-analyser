@@ -14,6 +14,7 @@ from football_vision.ball_detector import BallDetector
 from football_vision.possession import PossessionTracker
 from football_vision.events import EventDetector
 from football_vision.annotator import VideoAnnotator
+from football_vision.pitch_roi import select_pitch_vertical_band
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -40,6 +41,7 @@ def main():
     parser = argparse.ArgumentParser(description="Football Vision CLI Application")
     parser.add_argument("--input", required=True, type=str, help="Path to input video clip (e.g. clip.mp4)")
     parser.add_argument("--output", required=True, type=str, help="Directory to save the output report and heatmaps")
+    parser.add_argument("--skip-roi-selection", action="store_true", help="Skip interactive pitch vertical-band selection")
 
     args = parser.parse_args()
 
@@ -101,6 +103,21 @@ def main():
 
     logger.info(f"Initialized modules with target frame resolution: {w_res}x{h_res}")
 
+    # Fetch first frame to perform vertical-band ROI selection before the main loop
+    cap_init = cv2.VideoCapture(input_path)
+    pitch_y_min, pitch_y_max = 0.0, float(h_res)
+    if cap_init.isOpened():
+        ret_init, first_frame_raw = cap_init.read()
+        if ret_init:
+            first_frame_resized = resize_frame(first_frame_raw, max_side=640)
+            pitch_y_min, pitch_y_max = select_pitch_vertical_band(
+                first_frame_resized,
+                skip_roi_selection=args.skip_roi_selection
+            )
+        cap_init.release()
+
+    logger.info(f"[PITCH ROI] Active vertical band boundaries: PITCH_Y_MIN={pitch_y_min:.2f}, PITCH_Y_MAX={pitch_y_max:.2f}")
+
     frame_count = 0
 
     while True:
@@ -123,6 +140,15 @@ def main():
             all_detections = sv.Detections.from_ultralytics(results[0])
             person_detections = all_detections[all_detections.class_id == 0]
             ball_detections = all_detections[all_detections.class_id == 32]
+
+        # Filter person detections using the vertical-band pitch ROI
+        if len(person_detections) > 0:
+            keep_indices = []
+            for idx, bbox in enumerate(person_detections.xyxy):
+                y_max = bbox[3]  # bottom edge of person bounding box
+                if pitch_y_min <= y_max <= pitch_y_max:
+                    keep_indices.append(idx)
+            person_detections = person_detections[keep_indices]
 
         # 2. Tracking
         tracked_detections = tracker.update_with_detections(person_detections, frame=resized)
