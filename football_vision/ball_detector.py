@@ -1,14 +1,26 @@
+import logging
 import numpy as np
 import supervision as sv
 from typing import List, Tuple, Dict, Any, Optional
 
+logger = logging.getLogger(__name__)
+
 class BallDetector:
-    def __init__(self, max_interpolation_gap: int = 15):
+    def __init__(
+        self,
+        max_interpolation_gap: int = 15,
+        static_threshold_dist: float = 3.0,
+        static_threshold_frames: int = 20
+    ):
         """
         Initializes the Ball Detector.
         - max_interpolation_gap: maximum number of consecutive missing frames that can be interpolated.
+        - static_threshold_dist: small pixel-distance threshold to consider a detection static.
+        - static_threshold_frames: number of consecutive frames a candidate must stay static to be discarded.
         """
         self.max_interpolation_gap = max_interpolation_gap
+        self.static_threshold_dist = static_threshold_dist
+        self.static_threshold_frames = static_threshold_frames
         # Track raw ball center positions (x, y) or None for each frame
         self.raw_positions: List[Optional[Tuple[float, float]]] = []
         # Track final positions after interpolation (x, y) or None
@@ -37,12 +49,56 @@ class BallDetector:
 
         self.raw_positions.append((float(center_x), float(center_y)))
 
+    def apply_motion_plausibility_filter(self):
+        """
+        Filters raw_positions to discard detections that remain static (within static_threshold_dist)
+        for more than static_threshold_frames consecutive frames, treating them as static pitch markings.
+        """
+        n = len(self.raw_positions)
+        W = self.static_threshold_frames
+        if n < W:
+            return
+
+        static_flags = [False] * n
+
+        for i in range(n - W + 1):
+            window = self.raw_positions[i : i + W]
+            if any(pos is None for pos in window):
+                continue
+
+            ref_pos = window[0]
+            is_static = True
+            for pos in window:
+                dist = np.sqrt((pos[0] - ref_pos[0])**2 + (pos[1] - ref_pos[1])**2)
+                if dist > self.static_threshold_dist:
+                    is_static = False
+                    break
+
+            if is_static:
+                for j in range(i, i + W):
+                    static_flags[j] = True
+
+        # Discard static positions
+        for idx in range(n):
+            if static_flags[idx]:
+                pos = self.raw_positions[idx]
+                if pos is not None:
+                    logger.info(
+                        f"Discarded static ball candidate at frame {idx} (1-based: {idx + 1}): "
+                        f"position={pos}, threshold_dist={self.static_threshold_dist}, "
+                        f"consecutive_frames={self.static_threshold_frames}"
+                    )
+                    self.raw_positions[idx] = None
+
     def interpolate_gaps(self):
         """
         After processing all frames, fills short gaps of missing ball detections
         (up to self.max_interpolation_gap frames) via linear interpolation.
         Longer gaps stay marked as "missing" (and coordinate remains None).
         """
+        # Apply the motion-plausibility filter first
+        self.apply_motion_plausibility_filter()
+
         n = len(self.raw_positions)
         self.interpolated_positions = [None] * n
         self.sources = ["missing"] * n
