@@ -1,117 +1,45 @@
-import logging
 import cv2
 import numpy as np
-from typing import Tuple
+import logging
 
 logger = logging.getLogger(__name__)
 
-def select_pitch_vertical_band(
-    first_frame: np.ndarray,
-    skip_roi_selection: bool = False
-) -> Tuple[float, float]:
+# HSV Tunable constants for green pitch grass.
+# Note: lighting/grass-color variation, shadows, or different venues may require retuning these values.
+GREEN_HUE_MIN = 30
+GREEN_HUE_MAX = 95
+GREEN_SAT_MIN = 30
+GREEN_VAL_MIN = 30
+
+def detect_pitch_mask(frame: np.ndarray) -> np.ndarray:
     """
-    Selects the vertical band (PITCH_Y_MIN, PITCH_Y_MAX) of the playing field.
+    Detects the pitch area using color segmentation in the HSV color space.
 
-    ASSUMPTION: Camera only pans horizontally, does not tilt or zoom, so the vertical
-    extent of the visible pitch stays roughly constant across the clip even as horizontal
-    framing changes. This is a heuristic, not full field calibration — it will not work
-    correctly if the camera tilts/zooms, and that limitation should be logged as a startup warning.
+    1. Converts the frame to HSV.
+    2. Thresholds for green range based on tunable constants.
+    3. Applies morphological operations to remove noise.
+    4. Finds contours and keeps only the largest one (the pitch).
+    5. Returns a binary mask (same H, W as frame, type np.uint8) where 255 represents the pitch.
     """
-    height, width = first_frame.shape[:2]
-    default_min = 0.0
-    default_max = float(height)
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
 
-    # Log the startup heuristic warning
-    logger.warning(
-        "[PITCH ROI] WARNING: The pitch vertical-band filter assumes the camera ONLY pans "
-        "horizontally, without tilting or zooming. If the camera tilts, zooms, or has dynamic "
-        "vertical movement, this vertical band heuristic WILL NOT function correctly."
-    )
+    # Threshold green
+    lower_green = np.array([GREEN_HUE_MIN, GREEN_SAT_MIN, GREEN_VAL_MIN], dtype=np.uint8)
+    upper_green = np.array([GREEN_HUE_MAX, 255, 255], dtype=np.uint8)
+    mask = cv2.inRange(hsv, lower_green, upper_green)
 
-    if skip_roi_selection:
-        logger.info(
-            f"[PITCH ROI] Skipped interactive selection. Using full frame height: "
-            f"PITCH_Y_MIN={default_min:.2f}, PITCH_Y_MAX={default_max:.2f}"
-        )
-        return default_min, default_max
+    # Morphological operations to clean up small noise specks and fill small gaps
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
 
-    # Setup interactive selection
-    logger.info(
-        "[PITCH ROI] Opening interactive selection window. "
-        "Please click two points on the resized frame:\n"
-        "  1. A point on the TOPMOST boundary of the playing area.\n"
-        "  2. A point on the BOTTOMMOST boundary of the playing area.\n"
-        "Press any key to finalize after making selections (or if you wish to exit/bypass)."
-    )
+    # Find contours
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    clicked_y = []
-    display_frame = first_frame.copy()
+    pitch_mask = np.zeros_like(mask)
+    if contours:
+        # Keep only the largest connected contour
+        largest_contour = max(contours, key=cv2.contourArea)
+        cv2.drawContours(pitch_mask, [largest_contour], -1, 255, thickness=cv2.FILLED)
 
-    def mouse_callback(event, x, y, flags, param):
-        nonlocal display_frame
-        if event == cv2.EVENT_LBUTTONDOWN:
-            if len(clicked_y) < 2:
-                clicked_y.append(float(y))
-                # Draw a horizontal line at the selected y-coordinate
-                color = (0, 255, 0) if len(clicked_y) == 1 else (0, 0, 255)
-                label = "TOP Boundary" if len(clicked_y) == 1 else "BOTTOM Boundary"
-                cv2.line(display_frame, (0, y), (width, y), color, 2)
-                cv2.putText(
-                    display_frame,
-                    label,
-                    (10, y - 10 if y - 10 > 15 else y + 20),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.5,
-                    color,
-                    1,
-                    cv2.LINE_AA
-                )
-                cv2.imshow(window_name, display_frame)
-                if len(clicked_y) == 1:
-                    logger.info(f"[PITCH ROI] Click 1 (Top boundary) captured at y={y}")
-                elif len(clicked_y) == 2:
-                    logger.info(f"[PITCH ROI] Click 2 (Bottom boundary) captured at y={y}")
-
-    window_name = "Pitch ROI Selection - Click Top then Bottom boundary"
-    cv2.namedWindow(window_name)
-    cv2.setMouseCallback(window_name, mouse_callback)
-
-    # Show initial frame
-    cv2.imshow(window_name, display_frame)
-
-    # Wait for user input
-    while True:
-        key = cv2.waitKey(100) & 0xFF
-        # Break if any key is pressed or we have both coordinates and window is closed
-        if key != 255:
-            break
-        # Also break if window is closed (OpenCV doesn't always support getWindowProperty easily, but we try)
-        try:
-            if cv2.getWindowProperty(window_name, cv2.WND_PROP_VISIBLE) < 1:
-                break
-        except Exception:
-            pass
-
-    cv2.destroyWindow(window_name)
-
-    if len(clicked_y) == 2:
-        y_min = min(clicked_y)
-        y_max = max(clicked_y)
-        logger.info(
-            f"[PITCH ROI] Successfully selected pitch vertical band: "
-            f"PITCH_Y_MIN={y_min:.2f}, PITCH_Y_MAX={y_max:.2f}"
-        )
-        return y_min, y_max
-    elif len(clicked_y) == 1:
-        logger.warning(
-            f"[PITCH ROI] Incomplete selection (only 1 click registered). "
-            f"Bypassing selection and using full frame height: "
-            f"PITCH_Y_MIN={default_min:.2f}, PITCH_Y_MAX={default_max:.2f}"
-        )
-        return default_min, default_max
-    else:
-        logger.info(
-            f"[PITCH ROI] No selections made. Using full frame height: "
-            f"PITCH_Y_MIN={default_min:.2f}, PITCH_Y_MAX={default_max:.2f}"
-        )
-        return default_min, default_max
+    return pitch_mask
