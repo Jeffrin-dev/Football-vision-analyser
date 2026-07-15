@@ -135,7 +135,7 @@ def main():
         if tracked_detections.tracker_id is not None:
             for bbox, track_id in zip(tracked_detections.xyxy, tracked_detections.tracker_id):
                 # Sample color for team classification
-                team_classifier.add_player_sample(track_id, resized, bbox)
+                team_classifier.add_player_sample(track_id, frame_count - 1, resized, bbox)
                 # Accumulate positions for heatmap
                 heatmap_gen.accumulate_position(track_id, bbox)
 
