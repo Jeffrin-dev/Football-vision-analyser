@@ -142,59 +142,78 @@ class TeamClassifier:
 
         # Calculate movement ranges (bounding box diagonal of tracked centers)
         movement_ranges = {}
+        frames_tracked_dict = {}
         for tid in track_ids:
             positions = self.player_positions.get(tid, [])
+            frames_tracked_dict[tid] = len(positions)
             if not positions:
                 movement_ranges[tid] = 0.0
                 continue
             xs = [p[0] for p in positions]
             ys = [p[1] for p in positions]
-            dx = max(xs) - min(xs)
-            dy = max(ys) - min(ys)
-            movement_ranges[tid] = float(np.sqrt(dx**2 + dy**2))
+            min_x, max_x = min(xs), max(xs)
+            min_y, max_y = min(ys), max(ys)
+            movement_ranges[tid] = float(np.sqrt((max_x - min_x)**2 + (max_y - min_y)**2))
 
-        # Identify confirmed team A/B players (non-outliers with at least 5 frames of tracked history)
-        confirmed_tids = []
+        # Identify confirmed team A/B players (NOT color outliers) with frames_tracked >= 50
+        qualifying_ranges = []
         for tid in track_ids:
             avg_color = player_avg_colors[tid]
             dist_0 = np.linalg.norm(avg_color - centers[0])
             dist_1 = np.linalg.norm(avg_color - centers[1])
-            if dist_0 <= self.referee_threshold or dist_1 <= self.referee_threshold:
-                if len(self.player_positions.get(tid, [])) >= 5:
-                    confirmed_tids.append(tid)
-
-        if confirmed_tids:
-            confirmed_ranges = [movement_ranges[tid] for tid in confirmed_tids]
-            median_range = float(np.median(confirmed_ranges))
-        else:
-            all_ranges = [movement_ranges[tid] for tid in track_ids]
-            median_range = float(np.median(all_ranges)) if all_ranges else 100.0
-
-        # Protect against zero/extremely small median range
-        if median_range < 1.0:
-            median_range = 100.0
-
-        # Separate outlier check for referee/goalkeeper detection
-        for tid in track_ids:
-            avg_color = player_avg_colors[tid]
-            dist_0 = np.linalg.norm(avg_color - centers[0])
-            dist_1 = np.linalg.norm(avg_color - centers[1])
-
-            p_range = movement_ranges.get(tid, 0.0)
             is_outlier = (dist_0 > self.referee_threshold) and (dist_1 > self.referee_threshold)
 
+            if not is_outlier and frames_tracked_dict[tid] >= 50:
+                qualifying_ranges.append(movement_ranges[tid])
+
+        # Compute baseline_median_range
+        if qualifying_ranges:
+            baseline_median_range = float(np.median(qualifying_ranges))
+        else:
+            # Fallback to median of all non-outliers with frames_tracked > 0 if none has >= 50
+            non_outlier_ranges = []
+            for tid in track_ids:
+                avg_color = player_avg_colors[tid]
+                dist_0 = np.linalg.norm(avg_color - centers[0])
+                dist_1 = np.linalg.norm(avg_color - centers[1])
+                is_outlier = (dist_0 > self.referee_threshold) and (dist_1 > self.referee_threshold)
+                if not is_outlier and frames_tracked_dict[tid] > 0:
+                    non_outlier_ranges.append(movement_ranges[tid])
+            if non_outlier_ranges:
+                baseline_median_range = float(np.median(non_outlier_ranges))
+            else:
+                baseline_median_range = 100.0
+
+        # Protect against zero/extremely small baseline median range
+        if baseline_median_range < 1.0:
+            baseline_median_range = 100.0
+
+        # Perform classification for outlier/goalkeeper/referee
+        GK_RANGE_RATIO = 0.4
+        for tid in track_ids:
+            avg_color = player_avg_colors[tid]
+            dist_0 = np.linalg.norm(avg_color - centers[0])
+            dist_1 = np.linalg.norm(avg_color - centers[1])
+            is_outlier = (dist_0 > self.referee_threshold) and (dist_1 > self.referee_threshold)
+
+            frames_tracked = frames_tracked_dict[tid]
+            p_range = movement_ranges[tid]
+
             if is_outlier:
-                # Notably small relative to players (less than 40% of median range)
-                if p_range < 0.4 * median_range:
-                    self.assignments[tid] = "goalkeeper"
+                if frames_tracked < 30:
+                    self.assignments[tid] = "uncertain_outlier"
                 else:
-                    self.assignments[tid] = "referee"
+                    if p_range < baseline_median_range * GK_RANGE_RATIO:
+                        self.assignments[tid] = "goalkeeper"
+                    else:
+                        self.assignments[tid] = "referee"
 
             logger.info(
-                f"Classification decision: track_id={tid}, "
-                f"dist_to_centroid_0={dist_0:.2f}, dist_to_centroid_1={dist_1:.2f}, "
-                f"referee_threshold={self.referee_threshold:.2f}, "
-                f"movement_range={p_range:.2f}, median_player_range={median_range:.2f}, "
+                f"[CLASSIFICATION] Decision: track_id={tid}, frames_tracked={frames_tracked}, "
+                f"color_dist_0={dist_0:.2f}, color_dist_1={dist_1:.2f}, "
+                f"referee_threshold={self.referee_threshold:.2f}, is_outlier={is_outlier}, "
+                f"movement_range={p_range:.2f}, baseline_median_range={baseline_median_range:.2f}, "
+                f"GK_threshold={baseline_median_range * GK_RANGE_RATIO:.2f}, "
                 f"final_label={self.assignments[tid]}"
             )
 

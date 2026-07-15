@@ -140,7 +140,7 @@ def main():
                 heatmap_gen.accumulate_position(track_id, bbox)
 
         # Process ball detections (Phase 2)
-        ball_detector.process_frame_detections(ball_detections)
+        ball_detector.process_frame_detections(ball_detections, tracked_players=tracked_detections)
 
         if frame_count % 50 == 0:
             logger.info(f"Processed {frame_count} frames...")
@@ -207,7 +207,8 @@ def main():
         team_assignments=team_assignments,
         ball_positions=ball_detector.interpolated_positions,
         w_res=w_res,
-        h_res=h_res
+        h_res=h_res,
+        ball_widths=ball_detector.interpolated_widths
     )
     annotator.render()
 
