@@ -16,22 +16,29 @@ MAX_BALL_SPEED_PX_PER_FRAME = 40.0
 # Number of initial confirmed detections to accept as-is to bootstrap without continuity check
 BOOTSTRAP_CONFIRMED_COUNT = 3
 
+# Constants for ball tracker staleness / anchor recovery
+ANCHOR_STALENESS_LIMIT = 45
+ANCHOR_JITTER_TOLERANCE = 5.0
+
 class BallDetector:
     def __init__(
         self,
         max_interpolation_gap: int = 15,
         static_threshold_dist: float = 3.0,
-        static_threshold_frames: int = 20
+        static_threshold_frames: int = 20,
+        anchor_staleness_limit: int = ANCHOR_STALENESS_LIMIT
     ):
         """
         Initializes the Ball Detector.
         - max_interpolation_gap: maximum number of consecutive missing frames that can be interpolated.
         - static_threshold_dist: small pixel-distance threshold to consider a detection static.
         - static_threshold_frames: number of consecutive frames a candidate must stay static to be discarded.
+        - anchor_staleness_limit: number of consecutive frames the anchor position stays static before being distrusted.
         """
         self.max_interpolation_gap = max_interpolation_gap
         self.static_threshold_dist = static_threshold_dist
         self.static_threshold_frames = static_threshold_frames
+        self.anchor_staleness_limit = anchor_staleness_limit
         # Track raw ball center positions (x, y) or None for each frame
         self.raw_positions: List[Optional[Tuple[float, float]]] = []
         # Track raw ball bounding box widths or None for each frame
@@ -47,6 +54,7 @@ class BallDetector:
         self.last_confirmed_pos: Optional[Tuple[float, float]] = None
         self.last_confirmed_frame: Optional[int] = None
         self.confirmed_count: int = 0
+        self.stale_frame_count: int = 0
 
     def process_frame_detections(self, detections: sv.Detections, tracked_players: Optional[sv.Detections] = None):
         """
@@ -55,10 +63,24 @@ class BallDetector:
         If no ball is detected, records None.
         """
         frame_num = len(self.raw_positions) + 1
+        prev_anchor = self.last_confirmed_pos
+        is_distrusted = (prev_anchor is not None) and (self.stale_frame_count > self.anchor_staleness_limit)
+        accepted_new = False
 
         if len(detections) == 0:
             self.raw_positions.append(None)
             self.raw_widths.append(None)
+
+            # Update staleness state on early return
+            if prev_anchor is not None:
+                self.stale_frame_count += 1
+                if self.stale_frame_count == self.anchor_staleness_limit + 1:
+                    logger.warning(
+                        f"[BALL DETECTOR] STALE ANCHOR DETECTED: Frame {frame_num} triggered a stale-anchor event. "
+                        f"The anchor has been stuck for {self.stale_frame_count} frames at position "
+                        f"({prev_anchor[0]:.2f}, {prev_anchor[1]:.2f}). Marking anchor as distrusted."
+                    )
+
             logger.info(
                 f"[BALL DETECTOR] Frame {frame_num}: raw_candidates=0, proximity_passing=0, "
                 f"continuity_candidates_considered=0, chosen_speed=None, continuity_status=had-no-candidates, "
@@ -105,11 +127,12 @@ class BallDetector:
         passing_candidates = [item for item in candidates_with_dists if item[1] <= MAX_PLAUSIBLE_PLAYER_DISTANCE]
 
         if passing_candidates:
-            # Check bootstrap status
+            # Check bootstrap status or distrusted status
             is_bootstrap = (self.last_confirmed_pos is None) or (self.confirmed_count < BOOTSTRAP_CONFIRMED_COUNT)
+            use_fallback_selection = is_bootstrap or is_distrusted
 
-            if is_bootstrap:
-                # Bootstrap: pick the highest confidence passing candidate without continuity checks
+            if use_fallback_selection:
+                # Pick the highest confidence passing candidate without continuity checks
                 best_item = max(passing_candidates, key=lambda x: x[0]["confidence"])
                 chosen_candidate, nearest_distance = best_item
 
@@ -117,18 +140,20 @@ class BallDetector:
                 self.last_confirmed_pos = (chosen_candidate["x"], chosen_candidate["y"])
                 self.last_confirmed_frame = frame_num
                 self.confirmed_count += 1
+                accepted_new = True
 
                 self.raw_positions.append((chosen_candidate["x"], chosen_candidate["y"]))
                 self.raw_widths.append(chosen_candidate["width"])
 
+                decision_str = "distrusted_fallback" if is_distrusted else "bootstrap_normal"
                 logger.info(
                     f"[BALL DETECTOR] Frame {frame_num}: raw_candidates={len(candidates)}, "
                     f"proximity_passing={len(passing_candidates)}, continuity_candidates_considered={len(passing_candidates)}, "
-                    f"chosen_speed=None, continuity_status=passed, decision=bootstrap_normal, "
+                    f"chosen_speed=None, continuity_status=passed, decision={decision_str}, "
                     f"x={chosen_candidate['x']:.2f}, y={chosen_candidate['y']:.2f}"
                 )
             else:
-                # Not bootstrap: perform continuity check
+                # Not bootstrap/distrusted: perform continuity check
                 # Compute implied speed for each passing candidate
                 frames_elapsed = frame_num - self.last_confirmed_frame
                 for item in passing_candidates:
@@ -152,6 +177,7 @@ class BallDetector:
                     self.last_confirmed_pos = (chosen_candidate["x"], chosen_candidate["y"])
                     self.last_confirmed_frame = frame_num
                     self.confirmed_count += 1
+                    accepted_new = True
 
                     self.raw_positions.append((chosen_candidate["x"], chosen_candidate["y"]))
                     self.raw_widths.append(chosen_candidate["width"])
@@ -200,6 +226,32 @@ class BallDetector:
                     f"[BALL DETECTOR] Frame {frame_num}: raw_candidates={len(candidates)}, "
                     f"proximity_passing=0, continuity_candidates_considered=0, chosen_speed=None, "
                     f"continuity_status=had-no-candidates, decision=none"
+                )
+
+        # Update staleness state
+        if prev_anchor is not None:
+            if is_distrusted:
+                if accepted_new:
+                    self.stale_frame_count = 0
+                else:
+                    self.stale_frame_count += 1
+            else:
+                if self.last_confirmed_pos is not None:
+                    dx = self.last_confirmed_pos[0] - prev_anchor[0]
+                    dy = self.last_confirmed_pos[1] - prev_anchor[1]
+                    movement = np.sqrt(dx**2 + dy**2)
+                    if movement < ANCHOR_JITTER_TOLERANCE:
+                        self.stale_frame_count += 1
+                    else:
+                        self.stale_frame_count = 0
+                else:
+                    self.stale_frame_count += 1
+
+            if self.stale_frame_count == self.anchor_staleness_limit + 1:
+                logger.warning(
+                    f"[BALL DETECTOR] STALE ANCHOR DETECTED: Frame {frame_num} triggered a stale-anchor event. "
+                    f"The anchor has been stuck for {self.stale_frame_count} frames at position "
+                    f"({prev_anchor[0]:.2f}, {prev_anchor[1]:.2f}). Marking anchor as distrusted."
                 )
 
     def apply_motion_plausibility_filter(self):
