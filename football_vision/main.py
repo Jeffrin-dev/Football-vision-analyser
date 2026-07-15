@@ -14,7 +14,7 @@ from football_vision.ball_detector import BallDetector
 from football_vision.possession import PossessionTracker
 from football_vision.events import EventDetector
 from football_vision.annotator import VideoAnnotator
-from football_vision.pitch_roi import select_pitch_vertical_band
+from football_vision.pitch_roi import detect_pitch_mask
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -41,7 +41,6 @@ def main():
     parser = argparse.ArgumentParser(description="Football Vision CLI Application")
     parser.add_argument("--input", required=True, type=str, help="Path to input video clip (e.g. clip.mp4)")
     parser.add_argument("--output", required=True, type=str, help="Directory to save the output report and heatmaps")
-    parser.add_argument("--skip-roi-selection", action="store_true", help="Skip interactive pitch vertical-band selection")
 
     args = parser.parse_args()
 
@@ -103,20 +102,12 @@ def main():
 
     logger.info(f"Initialized modules with target frame resolution: {w_res}x{h_res}")
 
-    # Fetch first frame to perform vertical-band ROI selection before the main loop
-    cap_init = cv2.VideoCapture(input_path)
-    pitch_y_min, pitch_y_max = 0.0, float(h_res)
-    if cap_init.isOpened():
-        ret_init, first_frame_raw = cap_init.read()
-        if ret_init:
-            first_frame_resized = resize_frame(first_frame_raw, max_side=640)
-            pitch_y_min, pitch_y_max = select_pitch_vertical_band(
-                first_frame_resized,
-                skip_roi_selection=args.skip_roi_selection
-            )
-        cap_init.release()
-
-    logger.info(f"[PITCH ROI] Active vertical band boundaries: PITCH_Y_MIN={pitch_y_min:.2f}, PITCH_Y_MAX={pitch_y_max:.2f}")
+    # Startup log warning about limitations of automatic color segmentation
+    logger.warning(
+        "[PITCH MASK] WARNING: Pitch detection uses automatic color segmentation. This heuristic approach can "
+        "be thrown off by unusual lighting, shadows, or non-green playing surfaces (artificial turf variations, etc.), "
+        "and is not a guaranteed-robust field detection mechanism."
+    )
 
     frame_count = 0
 
@@ -129,8 +120,12 @@ def main():
 
         # Resize frame
         resized = resize_frame(frame, max_side=640)
+        h_frame, w_frame = resized.shape[:2]
 
-        # 1. Detection: Run YOLOv8n inference once to detect both "person" and "sports ball"
+        # 1. Compute pitch mask for the current frame
+        pitch_mask = detect_pitch_mask(resized)
+
+        # 2. Detection: Run YOLOv8n inference once to detect both "person" and "sports ball"
         results = detector.model(resized, verbose=False)
 
         if not results:
@@ -141,22 +136,33 @@ def main():
             person_detections = all_detections[all_detections.class_id == 0]
             ball_detections = all_detections[all_detections.class_id == 32]
 
-        # Filter person detections using the vertical-band pitch ROI
+        # Filter person detections using the pitch mask
+        excluded_count = 0
         if len(person_detections) > 0:
             keep_indices = []
             for idx, bbox in enumerate(person_detections.xyxy):
-                y_max = bbox[3]  # bottom edge of person bounding box
-                if pitch_y_min <= y_max <= pitch_y_max:
+                # Calculate the bottom-center point (feet position)
+                feet_x = int((bbox[0] + bbox[2]) / 2.0)
+                feet_y = int(bbox[3])
+
+                # Clip to within mask boundaries to avoid out of bounds errors
+                feet_x = max(0, min(feet_x, w_frame - 1))
+                feet_y = max(0, min(feet_y, h_frame - 1))
+
+                # Check if the feet position is inside the detected pitch mask (non-zero value)
+                if pitch_mask[feet_y, feet_x] > 0:
                     keep_indices.append(idx)
+                else:
+                    excluded_count += 1
             person_detections = person_detections[keep_indices]
 
-        # 2. Tracking
+        # 3. Tracking
         tracked_detections = tracker.update_with_detections(person_detections, frame=resized)
 
         # Record players for proximity possession (Phase 2)
         possession_tracker.record_players(frame_count - 1, tracked_detections)
 
-        # 3. Team Classification Samples & Heatmap Accumulation
+        # 4. Team Classification Samples & Heatmap Accumulation
         # tracker_id is present in tracked_detections.tracker_id
         if tracked_detections.tracker_id is not None:
             for bbox, track_id in zip(tracked_detections.xyxy, tracked_detections.tracker_id):
@@ -169,7 +175,15 @@ def main():
         ball_detector.process_frame_detections(ball_detections, tracked_players=tracked_detections)
 
         if frame_count % 50 == 0:
-            logger.info(f"Processed {frame_count} frames...")
+            # Calculate pitch percentage
+            total_pixels = h_frame * w_frame
+            pitch_pixels = np.sum(pitch_mask > 0)
+            pitch_percentage = (pitch_pixels / total_pixels) * 100.0
+
+            logger.info(
+                f"Processed {frame_count} frames... "
+                f"Pitch mask coverage: {pitch_percentage:.2f}%, Excluded detections this frame: {excluded_count}"
+            )
 
     cap.release()
     logger.info(f"Completed frame processing. Total frames: {frame_count}")
@@ -178,7 +192,7 @@ def main():
     ball_detector.interpolate_gaps()
     ball_stats = ball_detector.get_stats()
 
-    # 4. Fit and Classify Teams
+    # 5. Fit and Classify Teams
     logger.info("Performing team classification via KMeans clustering...")
     team_assignments = team_classifier.fit_and_classify()
 
@@ -189,7 +203,7 @@ def main():
         team_assignments=team_assignments
     )
 
-    # 5. Generate Heatmaps
+    # 6. Generate Heatmaps
     logger.info("Generating and saving team heatmaps...")
     heatmap_gen.generate_and_save_heatmaps(team_assignments, run_output_dir)
 
@@ -206,7 +220,7 @@ def main():
     )
     event_summary = event_detector.generate_summary(events)
 
-    # 6. Generate Report
+    # 7. Generate Report
     logger.info("Writing final report...")
     clip_name = os.path.basename(input_path)
     report_gen = ReportGenerator(clip_name=clip_name, frame_count=frame_count)
@@ -221,7 +235,7 @@ def main():
         event_summary=event_summary
     )
 
-    # 7. Render Annotated Video (Phase 4)
+    # 8. Render Annotated Video (Phase 4)
     logger.info("Rendering annotated video output...")
     smoothed_possession = event_detector.smooth_possession(possession_tracker.frame_possession)
     annotated_video_path = os.path.join(run_output_dir, "annotated_output.mp4")
