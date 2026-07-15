@@ -108,6 +108,8 @@ class VideoAnnotator:
                     color = (0, 255, 0)  # GREEN for the possession holder
                 elif team == "referee":
                     color = (255, 0, 0)  # BLUE for referee (BGR order: B is index 0)
+                elif team == "goalkeeper":
+                    color = (128, 0, 128)  # PURPLE for goalkeeper (BGR order)
                 else:
                     color = (0, 0, 255)  # RED for other players
 
@@ -137,9 +139,8 @@ class VideoAnnotator:
                 ball_pos = self.ball_positions[frame_idx]
                 if ball_pos is not None:
                     bx, by = ball_pos
-                    # Draw a distinct small circle on the ball (yellow color: (0, 255, 255))
-                    cv2.circle(resized, (int(round(bx)), int(round(by))), 6, (0, 255, 255), -1)
-                    cv2.circle(resized, (int(round(bx)), int(round(by))), 6, (0, 0, 0), 1)
+                    # Draw a small, thin circle outline (yellow color: (0, 255, 255)) as a precise indicator
+                    cv2.circle(resized, (int(round(bx)), int(round(by))), 4, (0, 255, 255), 1)
 
             # 3. Draw Persistent Text Overlay for smoothed possession in the corner
             if possession_holder is not None:
