@@ -6,15 +6,28 @@ from typing import Dict, List, Tuple
 logger = logging.getLogger(__name__)
 
 class TeamClassifier:
-    def __init__(self, max_frames: int = 10, referee_threshold: float = 60.0):
+    def __init__(
+        self,
+        max_frames: int = 10,
+        referee_threshold: float = 60.0,
+        sample_interval: int = 5,
+        max_samples: int = 30,
+        outlier_threshold: float = 40.0
+    ):
         """
         Initializes the Team Classifier.
         For each tracked player, we sample the average color of the torso region
-        over their first `max_frames` (default ~10) tracked frames.
+        over their tracked frames.
         - referee_threshold: distance threshold above which a player is reclassified as a referee.
+        - sample_interval: interval in frames to sample the torso color.
+        - max_samples: maximum total samples to use per player.
+        - outlier_threshold: threshold for rejecting outlier samples.
         """
         self.max_frames = max_frames
         self.referee_threshold = referee_threshold
+        self.sample_interval = sample_interval
+        self.max_samples = max_samples
+        self.outlier_threshold = outlier_threshold
         # Maps track_id to a list of sampled RGB colors (as numpy arrays or tuples)
         self.player_colors: Dict[int, List[np.ndarray]] = {}
         # Maps track_id to the final assigned team ('A' or 'B')
@@ -76,16 +89,11 @@ class TeamClassifier:
 
     def add_player_sample(self, track_id: int, frame_idx: int, frame: np.ndarray, bbox: Tuple[float, float, float, float]):
         """
-        If the player has fewer than `max_frames` samples, extract and store their torso color.
+        Extracts and stores torso color every `sample_interval` frames across their entire track,
+        without restricting to the first 10 frames or a maximum sample cap at extraction time (we
+        downsample/filter in fit_and_classify).
         Also records the player's positions to analyze movement range over the clip.
         """
-        if track_id not in self.player_colors:
-            self.player_colors[track_id] = []
-
-        if len(self.player_colors[track_id]) < self.max_frames:
-            color = self.extract_torso_color(frame, bbox)
-            self.player_colors[track_id].append(color)
-
         if track_id not in self.player_positions:
             self.player_positions[track_id] = []
 
@@ -94,19 +102,54 @@ class TeamClassifier:
         center_y = (y_min + y_max) / 2.0
         self.player_positions[track_id].append((frame_idx, center_x, center_y))
 
+        if track_id not in self.player_colors:
+            self.player_colors[track_id] = []
+
+        track_len = len(self.player_positions[track_id])
+        if (track_len - 1) % self.sample_interval == 0:
+            color = self.extract_torso_color(frame, bbox)
+            self.player_colors[track_id].append(color)
+
     def fit_and_classify(self) -> Dict[int, str]:
         """
-        Performs k-means clustering (k=2) across all players' average colors
+        Performs k-means clustering (k=2) across all players' robust color signatures
         to assign team 'A' or 'B'. Logs a warning if the cluster centers are too similar.
         Returns a dictionary mapping track_id to team ('A' or 'B').
         """
-        # Calculate the final average color for each player
+        # Calculate the final average/median color for each player with robust outlier rejection
         player_avg_colors = {}
         for track_id, colors in self.player_colors.items():
-            if colors:
-                player_avg_colors[track_id] = np.mean(colors, axis=0)
-            else:
+            if not colors:
                 player_avg_colors[track_id] = np.zeros(3)
+                continue
+
+            # 1. Cap samples at max_samples (evenly spaced across the tracked duration)
+            if len(colors) > self.max_samples:
+                indices = np.linspace(0, len(colors) - 1, self.max_samples, dtype=int)
+                colors = [colors[i] for i in indices]
+
+            colors_arr = np.array(colors)
+
+            # 2. Compute the initial median color vector across all samples
+            initial_median = np.median(colors_arr, axis=0)
+
+            # 3. Discard samples whose distance from the median exceeds outlier_threshold
+            distances = np.linalg.norm(colors_arr - initial_median, axis=1)
+            valid_mask = distances <= self.outlier_threshold
+            filtered_colors = colors_arr[valid_mask]
+
+            # 4. Log sample count before/after outlier rejection
+            logger.info(
+                f"[COLOR_OUTLIER_REJECTION] track_id={track_id}: "
+                f"samples before={len(colors_arr)}, after={len(filtered_colors)} "
+                f"(outlier_threshold={self.outlier_threshold:.2f})"
+            )
+
+            # 5. Use the median of the remaining samples, falling back to initial median if all rejected
+            if len(filtered_colors) > 0:
+                player_avg_colors[track_id] = np.median(filtered_colors, axis=0)
+            else:
+                player_avg_colors[track_id] = initial_median
 
         track_ids = list(player_avg_colors.keys())
         if not track_ids:
