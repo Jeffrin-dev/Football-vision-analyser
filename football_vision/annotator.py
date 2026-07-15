@@ -16,7 +16,8 @@ class VideoAnnotator:
         team_assignments: Dict[int, str],
         ball_positions: List[Optional[Tuple[float, float]]],
         w_res: int,
-        h_res: int
+        h_res: int,
+        ball_widths: Optional[List[Optional[float]]] = None
     ):
         self.input_path = input_path
         self.output_path = output_path
@@ -26,6 +27,7 @@ class VideoAnnotator:
         self.ball_positions = ball_positions
         self.w_res = w_res
         self.h_res = h_res
+        self.ball_widths = ball_widths
 
     def resize_frame(self, frame: np.ndarray, max_side: int = 640) -> np.ndarray:
         """
@@ -107,9 +109,11 @@ class VideoAnnotator:
                 if track_id == possession_holder:
                     color = (0, 255, 0)  # GREEN for the possession holder
                 elif team == "referee":
-                    color = (255, 0, 0)  # BLUE for referee (BGR order: B is index 0)
+                    color = (255, 0, 0)  # BLUE for referee (BGR order)
                 elif team == "goalkeeper":
                     color = (128, 0, 128)  # PURPLE for goalkeeper (BGR order)
+                elif team == "uncertain_outlier":
+                    color = (0, 165, 255)  # ORANGE for uncertain outlier (BGR order)
                 else:
                     color = (0, 0, 255)  # RED for other players
 
@@ -139,8 +143,15 @@ class VideoAnnotator:
                 ball_pos = self.ball_positions[frame_idx]
                 if ball_pos is not None:
                     bx, by = ball_pos
-                    # Draw a small, thin circle outline (yellow color: (0, 255, 255)) as a precise indicator
-                    cv2.circle(resized, (int(round(bx)), int(round(by))), 4, (0, 255, 255), 1)
+                    # Radius = half the width of the actual detected/interpolated ball bounding box for that frame
+                    radius = 4.0
+                    if self.ball_widths is not None and frame_idx < len(self.ball_widths):
+                        bw = self.ball_widths[frame_idx]
+                        if bw is not None:
+                            radius = bw / 2.0
+
+                    # Draw a thin circle outline (not filled) (yellow color: (0, 255, 255))
+                    cv2.circle(resized, (int(round(bx)), int(round(by))), max(1, int(round(radius))), (0, 255, 255), 1)
 
             # 3. Draw Persistent Text Overlay for smoothed possession in the corner
             if possession_holder is not None:
