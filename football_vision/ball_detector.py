@@ -2,8 +2,12 @@ import logging
 import numpy as np
 import supervision as sv
 from typing import List, Tuple, Dict, Any, Optional
+from ultralytics import YOLO
 
 logger = logging.getLogger(__name__)
+
+# Default model path for ball detection
+DEFAULT_BALL_MODEL_PATH = "runs/detect/ball_finetune/weights/best.pt"
 
 # Constant for ball detector player proximity filtering (in pixels)
 # start at 80 pixels, at the 640px-wide working resolution — may need adjusting based on typical player spacing observed
@@ -26,7 +30,8 @@ class BallDetector:
         max_interpolation_gap: int = 15,
         static_threshold_dist: float = 3.0,
         static_threshold_frames: int = 20,
-        anchor_staleness_limit: int = ANCHOR_STALENESS_LIMIT
+        anchor_staleness_limit: int = ANCHOR_STALENESS_LIMIT,
+        ball_model_path: str = DEFAULT_BALL_MODEL_PATH
     ):
         """
         Initializes the Ball Detector.
@@ -34,11 +39,23 @@ class BallDetector:
         - static_threshold_dist: small pixel-distance threshold to consider a detection static.
         - static_threshold_frames: number of consecutive frames a candidate must stay static to be discarded.
         - anchor_staleness_limit: number of consecutive frames the anchor position stays static before being distrusted.
+        - ball_model_path: path to the weights of the YOLO model to use for ball detection.
         """
         self.max_interpolation_gap = max_interpolation_gap
         self.static_threshold_dist = static_threshold_dist
         self.static_threshold_frames = static_threshold_frames
         self.anchor_staleness_limit = anchor_staleness_limit
+        self.ball_model_path = ball_model_path
+
+        # Load ball detection model
+        self.model = YOLO(ball_model_path)
+
+        # Determine ball class ID depending on loaded model
+        if "yolov8n.pt" in ball_model_path.lower():
+            self.ball_class_id = 32
+        else:
+            self.ball_class_id = 0
+
         # Track raw ball center positions (x, y) or None for each frame
         self.raw_positions: List[Optional[Tuple[float, float]]] = []
         # Track raw ball bounding box widths or None for each frame
@@ -339,7 +356,23 @@ class BallDetector:
                     "source": src
                 })
 
+        model_type = "generic" if "yolov8n.pt" in self.ball_model_path.lower() else "custom"
+        total_frames = len(self.sources)
+
+        # Clear per-run summary print/logging
+        print(f"\n=========================================")
+        print(f"[BALL DETECTOR RUN SUMMARY]")
+        print(f"  Model Path Loaded: {self.ball_model_path}")
+        print(f"  Model Type:        {model_type.upper()}")
+        print(f"  Total Frames:      {total_frames}")
+        print(f"  Detected:          {frames_detected}")
+        print(f"  Interpolated:      {frames_interpolated}")
+        print(f"  Missing:           {frames_missing}")
+        print(f"=========================================\n")
+
         return {
+            "model_path": self.ball_model_path,
+            "model_type": model_type,
             "frames_detected": frames_detected,
             "frames_interpolated": frames_interpolated,
             "frames_missing": frames_missing,

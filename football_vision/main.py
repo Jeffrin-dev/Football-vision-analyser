@@ -41,6 +41,7 @@ def main():
     parser = argparse.ArgumentParser(description="Football Vision CLI Application")
     parser.add_argument("--input", required=True, type=str, help="Path to input video clip (e.g. clip.mp4)")
     parser.add_argument("--output", required=True, type=str, help="Directory to save the output report and heatmaps")
+    parser.add_argument("--ball-model-path", type=str, default="runs/detect/ball_finetune/weights/best.pt", help="Path to ball detection model weights")
 
     args = parser.parse_args()
 
@@ -97,7 +98,7 @@ def main():
     heatmap_gen = HeatmapGenerator(width=w_res, height=h_res)
 
     # Initialize Phase 2 components
-    ball_detector = BallDetector()
+    ball_detector = BallDetector(ball_model_path=args.ball_model_path)
     possession_tracker = PossessionTracker()
 
     logger.info(f"Initialized modules with target frame resolution: {w_res}x{h_res}")
@@ -134,7 +135,17 @@ def main():
         else:
             all_detections = sv.Detections.from_ultralytics(results[0])
             person_detections = all_detections[all_detections.class_id == 0]
-            ball_detections = all_detections[all_detections.class_id == 32]
+
+            # Extract ball detections: branch depending on loaded ball model
+            if ball_detector.ball_class_id == 32:
+                ball_detections = all_detections[all_detections.class_id == 32]
+            else:
+                ball_results = ball_detector.model(resized, verbose=False)
+                if ball_results:
+                    ball_all = sv.Detections.from_ultralytics(ball_results[0])
+                    ball_detections = ball_all[ball_all.class_id == 0]
+                else:
+                    ball_detections = sv.Detections.empty()
 
         # Filter person detections using the pitch mask
         excluded_count = 0
